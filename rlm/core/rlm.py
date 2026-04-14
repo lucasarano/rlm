@@ -75,6 +75,8 @@ class RLM:
         on_subcall_complete: Callable[[int, str, float, str | None], None] | None = None,
         on_iteration_start: Callable[[int, int], None] | None = None,
         on_iteration_complete: Callable[[int, int, float], None] | None = None,
+        on_response: Callable[[int, str], None] | None = None,
+        on_token: Callable[[int, str], None] | None = None,
     ):
         """
         Args:
@@ -109,6 +111,11 @@ class RLM:
             on_subcall_complete: Callback fired when a child RLM completes. Args: (depth, model, duration, error_or_none).
             on_iteration_start: Callback fired when an iteration starts. Args: (depth, iteration_num).
             on_iteration_complete: Callback fired when an iteration completes. Args: (depth, iteration_num, duration).
+            on_response: Callback fired when the LM response text is received, before code execution. Args: (depth, response_text).
+            on_token: Callback fired for each token delta during streaming completion.
+                Args: (depth, token_text). When set and the backend supports streaming,
+                uses streaming_completion for root turns, recursive child turns, and
+                plain llm_query() calls routed through the LM handler.
         """
         # Store config for spawning per-completion
         self.backend = backend
@@ -153,6 +160,8 @@ class RLM:
         self.on_subcall_complete = on_subcall_complete
         self.on_iteration_start = on_iteration_start
         self.on_iteration_complete = on_iteration_complete
+        self.on_response = on_response
+        self.on_token = on_token
 
         # Tracking (cumulative across all calls including children)
         self._cumulative_cost: float = 0.0
@@ -205,7 +214,13 @@ class RLM:
         if self.other_backends and self.other_backend_kwargs:
             other_backend_client = get_client(self.other_backends[0], self.other_backend_kwargs[0])
 
-        lm_handler = LMHandler(client, other_backend_client=other_backend_client)
+        lm_handler = LMHandler(
+            client,
+            other_backend_client=other_backend_client,
+            on_token=self.on_token,
+            on_subcall_start=self.on_subcall_start,
+            on_subcall_complete=self.on_subcall_complete,
+        )
 
         # Register other clients to be available as sub-call options (by model name)
         if self.other_backends and self.other_backend_kwargs:
@@ -214,6 +229,9 @@ class RLM:
                 lm_handler.register_client(other_client.model_name, other_client)
 
         lm_handler.start()
+
+        def local_lm_completion(prompt: str, model: str | None, depth: int) -> RLMChatCompletion:
+            return self._plain_lm_completion(prompt, model, depth, lm_handler)
 
         # Environment: reuse if persistent, otherwise create fresh
         if self.persistent and self._persistent_env is not None:
@@ -226,6 +244,8 @@ class RLM:
                     f"This should have been caught at initialization."
                 )
             environment.update_handler_address((lm_handler.host, lm_handler.port))
+            if hasattr(environment, "update_lm_completion_fn"):
+                environment.update_lm_completion_fn(local_lm_completion)
             environment.add_context(prompt)
         else:
             env_kwargs = self.environment_kwargs.copy()
@@ -235,6 +255,8 @@ class RLM:
             # For local environment with max_depth > 1, pass subcall callback for recursive RLM calls
             if self.environment_type == "local" and self.max_depth > 1:
                 env_kwargs["subcall_fn"] = self._subcall
+            if self.environment_type == "local":
+                env_kwargs["lm_completion_fn"] = local_lm_completion
             # Pass custom tools to the environment
             if self.custom_tools is not None:
                 env_kwargs["custom_tools"] = self.custom_tools
@@ -342,6 +364,10 @@ class RLM:
                         build_user_prompt(root_prompt, i, context_count, history_count)
                     ]
 
+                    if self.on_iteration_start:
+                        self.on_iteration_start(self.depth, i)
+
+                    iteration_start = time.perf_counter()
                     iteration: RLMIteration = self._completion_turn(
                         prompt=current_prompt,
                         lm_handler=lm_handler,
@@ -374,6 +400,11 @@ class RLM:
 
                     # Verbose output for this iteration
                     self.verbose.print_iteration(iteration, i + 1)
+
+                    if self.on_iteration_complete:
+                        self.on_iteration_complete(
+                            self.depth, i, time.perf_counter() - iteration_start
+                        )
 
                     if final_answer is not None:
                         time_end = time.perf_counter()
@@ -598,7 +629,20 @@ class RLM:
         and code execution + tool execution.
         """
         iter_start = time.perf_counter()
-        response = lm_handler.completion(prompt)
+
+        if self.on_token and hasattr(lm_handler.get_client(), "streaming_completion"):
+
+            def token_cb(text: str) -> None:
+                self.on_token(self.depth, text)
+
+            response = lm_handler.get_client().streaming_completion(prompt, on_token=token_cb)
+        else:
+            response = lm_handler.completion(prompt)
+
+        # Fire callback immediately so callers can stream the response text
+        if self.on_response:
+            self.on_response(self.depth, response)
+
         code_block_strs = find_code_blocks(response)
         code_blocks = []
 
@@ -613,6 +657,66 @@ class RLM:
             code_blocks=code_blocks,
             iteration_time=iteration_time,
         )
+
+    def _plain_lm_completion(
+        self,
+        prompt: str,
+        model: str | None,
+        depth: int,
+        lm_handler: LMHandler,
+    ) -> RLMChatCompletion:
+        """Run a plain local llm_query call with live callbacks in the caller thread."""
+        client = lm_handler.get_client(model, depth)
+        root_model = model or client.model_name
+        prompt_preview = prompt[:80] if len(prompt) > 80 else prompt
+
+        if self.on_subcall_start:
+            try:
+                self.on_subcall_start(depth, str(root_model), prompt_preview)
+            except Exception:
+                pass
+
+        start_time = time.perf_counter()
+        error_msg: str | None = None
+        try:
+            if self.on_token and hasattr(client, "streaming_completion"):
+
+                def token_cb(text: str) -> None:
+                    self.on_token(depth, text)
+
+                response = client.streaming_completion(prompt, on_token=token_cb)
+            else:
+                response = client.completion(prompt)
+
+            model_usage = client.get_last_usage()
+            usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
+            return RLMChatCompletion(
+                root_model=root_model,
+                prompt=prompt,
+                response=response,
+                usage_summary=usage_summary,
+                execution_time=time.perf_counter() - start_time,
+            )
+        except Exception as e:
+            error_msg = str(e)
+            return RLMChatCompletion(
+                root_model=root_model,
+                prompt=prompt,
+                response=f"Error: LM query failed - {e}",
+                usage_summary=UsageSummary(model_usage_summaries={}),
+                execution_time=time.perf_counter() - start_time,
+            )
+        finally:
+            if self.on_subcall_complete:
+                try:
+                    self.on_subcall_complete(
+                        depth,
+                        str(root_model),
+                        time.perf_counter() - start_time,
+                        error_msg,
+                    )
+                except Exception:
+                    pass
 
     def _default_answer(self, message_history: list[dict[str, Any]], lm_handler: LMHandler) -> str:
         """
@@ -644,6 +748,13 @@ class RLM:
         Fallback behavior if the RLM is actually at max depth, and should be treated as an LM.
         """
         client: BaseLM = get_client(self.backend, self.backend_kwargs)
+        if self.on_token and hasattr(client, "streaming_completion"):
+
+            def token_cb(text: str) -> None:
+                self.on_token(self.depth, text)
+
+            return client.streaming_completion(message, on_token=token_cb)
+
         response = client.completion(message)
         return response
 
@@ -682,9 +793,23 @@ class RLM:
             else:
                 client = get_client(self.backend, child_backend_kwargs or {})
             root_model = model or client.model_name
+            prompt_preview = prompt[:80] if len(prompt) > 80 else prompt
+            if self.on_subcall_start:
+                try:
+                    self.on_subcall_start(next_depth, str(root_model), prompt_preview)
+                except Exception:
+                    pass
             start_time = time.perf_counter()
+            error_msg: str | None = None
             try:
-                response = client.completion(prompt)
+                if self.on_token and hasattr(client, "streaming_completion"):
+
+                    def token_cb(text: str) -> None:
+                        self.on_token(next_depth, text)
+
+                    response = client.streaming_completion(prompt, on_token=token_cb)
+                else:
+                    response = client.completion(prompt)
                 end_time = time.perf_counter()
                 model_usage = client.get_last_usage()
                 usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
@@ -696,6 +821,7 @@ class RLM:
                     execution_time=end_time - start_time,
                 )
             except Exception as e:
+                error_msg = str(e)
                 end_time = time.perf_counter()
                 return RLMChatCompletion(
                     root_model=root_model,
@@ -704,6 +830,13 @@ class RLM:
                     usage_summary=UsageSummary(model_usage_summaries={}),
                     execution_time=end_time - start_time,
                 )
+            finally:
+                if self.on_subcall_complete:
+                    try:
+                        duration = time.perf_counter() - start_time
+                        self.on_subcall_complete(next_depth, str(root_model), duration, error_msg)
+                    except Exception:
+                        pass
 
         # Calculate remaining budget for child (if budget tracking enabled)
         remaining_budget = None
@@ -775,6 +908,10 @@ class RLM:
             # Propagate callbacks to children for nested tracking
             on_subcall_start=self.on_subcall_start,
             on_subcall_complete=self.on_subcall_complete,
+            on_iteration_start=self.on_iteration_start,
+            on_iteration_complete=self.on_iteration_complete,
+            on_response=self.on_response,
+            on_token=self.on_token,
         )
         try:
             result = child.completion(prompt, root_prompt=None)

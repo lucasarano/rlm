@@ -6,6 +6,7 @@ Uses a multi-threaded socket server. Protocol: 4-byte length prefix + JSON paylo
 
 import asyncio
 import time
+from collections.abc import Callable
 from socketserver import StreamRequestHandler, ThreadingTCPServer
 from threading import Thread
 
@@ -61,13 +62,36 @@ class LMRequestHandler(StreamRequestHandler):
     def _handle_single(self, request: LMRequest, handler: "LMHandler") -> LMResponse:
         """Handle a single prompt request."""
         client = handler.get_client(request.model, request.depth)
+        root_model = request.model or client.model_name
+        prompt_preview = request.prompt[:80] if len(request.prompt) > 80 else request.prompt
+
+        if handler.on_subcall_start:
+            try:
+                handler.on_subcall_start(request.depth, str(root_model), prompt_preview)
+            except Exception:
+                pass
 
         start_time = time.perf_counter()
-        content = client.completion(request.prompt)
-        end_time = time.perf_counter()
+        error_msg: str | None = None
+        try:
+            content = handler._complete(client, request.prompt, request.depth)
+        except Exception as e:
+            error_msg = str(e)
+            raise
+        finally:
+            end_time = time.perf_counter()
+            if handler.on_subcall_complete:
+                try:
+                    handler.on_subcall_complete(
+                        request.depth,
+                        str(root_model),
+                        end_time - start_time,
+                        error_msg,
+                    )
+                except Exception:
+                    pass
 
         model_usage = client.get_last_usage()
-        root_model = request.model or client.model_name
         usage_summary = UsageSummary(model_usage_summaries={root_model: model_usage})
         return LMResponse.success_response(
             chat_completion=RLMChatCompletion(
@@ -89,7 +113,32 @@ class LMRequestHandler(StreamRequestHandler):
 
         async def run_one(prompt: str):
             async with sem:
-                return await client.acompletion(prompt)
+                root_model = request.model or client.model_name
+                prompt_preview = prompt[:80] if len(prompt) > 80 else prompt
+                if handler.on_subcall_start:
+                    try:
+                        handler.on_subcall_start(request.depth, str(root_model), prompt_preview)
+                    except Exception:
+                        pass
+
+                start_time = time.perf_counter()
+                error_msg: str | None = None
+                try:
+                    return await client.acompletion(prompt)
+                except Exception as e:
+                    error_msg = str(e)
+                    raise
+                finally:
+                    if handler.on_subcall_complete:
+                        try:
+                            handler.on_subcall_complete(
+                                request.depth,
+                                str(root_model),
+                                time.perf_counter() - start_time,
+                                error_msg,
+                            )
+                        except Exception:
+                            pass
 
         async def run_all():
             tasks = [run_one(prompt) for prompt in request.prompts]
@@ -139,6 +188,9 @@ class LMHandler:
         port: int = 0,  # auto-assign available port
         other_backend_client: BaseLM | None = None,
         batch_max_concurrent: int = 16,
+        on_token: Callable[[int, str], None] | None = None,
+        on_subcall_start: Callable[[int, str, str], None] | None = None,
+        on_subcall_complete: Callable[[int, str, float, str | None], None] | None = None,
     ):
         self.default_client = client
         self.other_backend_client = other_backend_client
@@ -148,6 +200,9 @@ class LMHandler:
         self._thread: Thread | None = None
         self._port = port
         self.batch_max_concurrent = batch_max_concurrent
+        self.on_token = on_token
+        self.on_subcall_start = on_subcall_start
+        self.on_subcall_complete = on_subcall_complete
 
         self.register_client(client.model_name, client)
 
@@ -207,6 +262,17 @@ class LMHandler:
     def completion(self, prompt: str, model: str | None = None) -> str:
         """Direct completion call (for main process use)."""
         return self.get_client(model).completion(prompt)
+
+    def _complete(self, client: BaseLM, prompt: str, depth: int) -> str:
+        """Run a completion, streaming token deltas when the client supports it."""
+        if self.on_token and hasattr(client, "streaming_completion"):
+
+            def token_cb(text: str) -> None:
+                self.on_token(depth, text)
+
+            return client.streaming_completion(prompt, on_token=token_cb)
+
+        return client.completion(prompt)
 
     def __enter__(self):
         self.start()

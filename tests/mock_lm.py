@@ -39,6 +39,13 @@ class MockLM(BaseLM):
         prompt_str = prompt if isinstance(prompt, str) else str(prompt)[:80]
         return f"Mock response to: {prompt_str}"
 
+    def streaming_completion(
+        self, prompt: str | dict[str, Any], on_token: Callable[[str], None]
+    ) -> str:
+        response = self.completion(prompt)
+        on_token(response)
+        return response
+
     async def acompletion(self, prompt: str | dict[str, Any]) -> str:
         return self.completion(prompt)
 

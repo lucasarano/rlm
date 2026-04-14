@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 import rlm.core.rlm as rlm_module
 from rlm import RLM
 from rlm.core.types import ModelUsageSummary, UsageSummary
+from tests.mock_lm import MockLM
 
 
 def create_mock_lm(responses: list[str], model_name: str = "mock-model") -> Mock:
@@ -468,5 +469,88 @@ class TestSubcallCombinedParameters:
             child_backend_kwargs = captured_child_params.get("backend_kwargs", {})
             assert child_backend_kwargs.get("model_name") == "override-model"
             assert child_backend_kwargs.get("api_key") == "test-key"
+
+            parent.close()
+
+
+class TestSubcallStreamingCallbacks:
+    """Tests for live callback propagation to child RLMs."""
+
+    def test_leaf_subcall_streams_tokens_and_progress_callbacks(self):
+        """Leaf subcalls should stream like recursive child RLM turns."""
+        tokens = []
+        starts = []
+        completes = []
+
+        with patch.object(rlm_module, "get_client") as mock_get_client:
+            mock_get_client.return_value = MockLM(responses=["leaf response"])
+
+            parent = RLM(
+                backend="openai",
+                backend_kwargs={"model_name": "parent-model"},
+                depth=1,
+                max_depth=2,
+                on_token=lambda depth, text: tokens.append((depth, text)),
+                on_subcall_start=lambda depth, model, preview: starts.append(
+                    (depth, model, preview)
+                ),
+                on_subcall_complete=lambda depth, model, duration, error: completes.append(
+                    (depth, model, error)
+                ),
+            )
+
+            result = parent._subcall("test prompt")
+
+            assert result.response == "leaf response"
+            assert tokens == [(2, "leaf response")]
+            assert starts == [(2, "mock-model", "test prompt")]
+            assert completes == [(2, "mock-model", None)]
+
+            parent.close()
+
+    def test_child_receives_live_streaming_callbacks(self):
+        """Child RLMs should receive the same live callbacks as the parent."""
+        captured_child_params = {}
+
+        original_rlm_class = rlm_module.RLM
+
+        class CapturingRLM(original_rlm_class):
+            def __init__(self, *args, **kwargs):
+                captured_child_params.update(kwargs)
+                super().__init__(*args, **kwargs)
+
+        def on_token(depth: int, text: str) -> None:
+            pass
+
+        def on_iteration_start(depth: int, iteration_num: int) -> None:
+            pass
+
+        def on_iteration_complete(depth: int, iteration_num: int, duration: float) -> None:
+            pass
+
+        def on_response(depth: int, response: str) -> None:
+            pass
+
+        with patch.object(rlm_module, "get_client") as mock_get_client:
+            mock_lm = create_mock_lm(["FINAL(answer)"])
+            mock_get_client.return_value = mock_lm
+
+            parent = RLM(
+                backend="openai",
+                backend_kwargs={"model_name": "parent-model"},
+                max_depth=3,
+                on_token=on_token,
+                on_iteration_start=on_iteration_start,
+                on_iteration_complete=on_iteration_complete,
+                on_response=on_response,
+            )
+
+            with patch.object(rlm_module, "RLM", CapturingRLM):
+                parent._subcall("test prompt")
+
+            assert captured_child_params.get("on_token") is on_token
+            assert captured_child_params.get("on_iteration_start") is on_iteration_start
+            assert captured_child_params.get("on_iteration_complete") is on_iteration_complete
+            assert captured_child_params.get("on_response") is on_response
 
             parent.close()

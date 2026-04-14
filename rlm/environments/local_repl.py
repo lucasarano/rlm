@@ -133,6 +133,7 @@ class LocalREPL(NonIsolatedEnv):
         persistent: bool = False,
         depth: int = 1,
         subcall_fn: Callable[[str, str | None], RLMChatCompletion] | None = None,
+        lm_completion_fn: Callable[[str, str | None, int], RLMChatCompletion] | None = None,
         custom_tools: dict[str, Any] | None = None,
         custom_sub_tools: dict[str, Any] | None = None,
         compaction: bool = False,
@@ -148,6 +149,7 @@ class LocalREPL(NonIsolatedEnv):
 
         self.lm_handler_address = lm_handler_address
         self.subcall_fn = subcall_fn  # Callback for recursive RLM calls (depth > 1 support)
+        self.lm_completion_fn = lm_completion_fn
         self.original_cwd = os.getcwd()
         self.temp_dir = tempfile.mkdtemp(prefix=f"repl_env_{uuid.uuid4()}_")
         self._lock = threading.Lock()
@@ -254,6 +256,14 @@ class LocalREPL(NonIsolatedEnv):
             prompt: The prompt to send to the LM.
             model: Optional model name to use (if handler has multiple clients).
         """
+        if self.lm_completion_fn is not None:
+            try:
+                completion = self.lm_completion_fn(prompt, model, self.depth)
+                self._pending_llm_calls.append(completion)
+                return completion.response
+            except Exception as e:
+                return f"Error: LM query failed - {e}"
+
         if not self.lm_handler_address:
             return "Error: No LM handler configured"
 
@@ -281,6 +291,9 @@ class LocalREPL(NonIsolatedEnv):
         Returns:
             List of responses in the same order as input prompts.
         """
+        if self.lm_completion_fn is not None:
+            return [self._llm_query(prompt, model) for prompt in prompts]
+
         if not self.lm_handler_address:
             return ["Error: No LM handler configured"] * len(prompts)
         try:
@@ -431,6 +444,13 @@ class LocalREPL(NonIsolatedEnv):
     def update_handler_address(self, address: tuple[str, int]) -> None:
         """Update the LM handler address for a new completion call."""
         self.lm_handler_address = address
+
+    def update_lm_completion_fn(
+        self,
+        lm_completion_fn: Callable[[str, str | None, int], RLMChatCompletion] | None,
+    ) -> None:
+        """Update the direct local LM completion callback for a new completion call."""
+        self.lm_completion_fn = lm_completion_fn
 
     def get_context_count(self) -> int:
         """Return the number of contexts loaded."""

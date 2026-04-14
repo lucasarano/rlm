@@ -16,6 +16,32 @@ def test_lm_handler_single_request():
     assert response.chat_completion.response == "hello back"
 
 
+def test_lm_handler_single_request_streams_tokens_with_depth():
+    """Single prompt requests stream token callbacks for llm_query callers."""
+    mock = MockLM(responses=["hello back"])
+    tokens = []
+    starts = []
+    completes = []
+
+    with LMHandler(
+        client=mock,
+        on_token=lambda depth, text: tokens.append((depth, text)),
+        on_subcall_start=lambda depth, model, preview: starts.append((depth, model, preview)),
+        on_subcall_complete=lambda depth, model, duration, error: completes.append(
+            (depth, model, error)
+        ),
+    ) as handler:
+        request = LMRequest(prompt="hello", depth=3)
+        response = send_lm_request(handler.address, request)
+
+    assert response.success
+    assert response.chat_completion is not None
+    assert response.chat_completion.response == "hello back"
+    assert tokens == [(3, "hello back")]
+    assert starts == [(3, "mock-model", "hello")]
+    assert completes == [(3, "mock-model", None)]
+
+
 def test_lm_handler_batched_request():
     """Batched prompts return one response per prompt in order."""
     responses = [f"r{i}" for i in range(5)]

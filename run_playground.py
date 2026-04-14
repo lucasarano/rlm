@@ -49,13 +49,15 @@ def emit_progress(message: str, detail: str | None = None) -> None:
 
 def emit_debug(message: str, **details) -> None:
     """Emit low-volume structured debug data for live-stream troubleshooting."""
-    emit({
-        "type": "debug",
-        "source": "run_playground",
-        "message": message,
-        "details": details,
-        "timestamp": datetime.now().isoformat(),
-    })
+    emit(
+        {
+            "type": "debug",
+            "source": "run_playground",
+            "message": message,
+            "details": details,
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
 
 
 class StreamingLogger(RLMLogger):
@@ -66,11 +68,13 @@ class StreamingLogger(RLMLogger):
 
     def log_metadata(self, metadata: RLMMetadata) -> None:
         super().log_metadata(metadata)
-        emit({
-            "type": "metadata",
-            "timestamp": datetime.now().isoformat(),
-            **metadata.to_dict(),
-        })
+        emit(
+            {
+                "type": "metadata",
+                "timestamp": datetime.now().isoformat(),
+                **metadata.to_dict(),
+            }
+        )
 
     def log(self, iteration: RLMIteration) -> None:
         super().log(iteration)
@@ -85,12 +89,14 @@ class StreamingLogger(RLMLogger):
                 if code_block.result is not None
             ),
         )
-        emit({
-            "type": "iteration",
-            "iteration": self._iteration_count,
-            "timestamp": datetime.now().isoformat(),
-            **iteration.to_dict(),
-        })
+        emit(
+            {
+                "type": "iteration",
+                "iteration": self._iteration_count,
+                "timestamp": datetime.now().isoformat(),
+                **iteration.to_dict(),
+            }
+        )
 
 
 # --- Callbacks for real-time granular streaming ---
@@ -117,12 +123,14 @@ def on_response(depth: int, response_text: str) -> None:
         response_chars=len(response_text or ""),
         response_subcall_patterns=len(SUBCALL_PATTERN.findall(response_text or "")),
     )
-    emit({
-        "type": "response_text",
-        "depth": depth,
-        "text": response_text,
-        "timestamp": datetime.now().isoformat(),
-    })
+    emit(
+        {
+            "type": "response_text",
+            "depth": depth,
+            "text": response_text,
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
 
 
 def on_token(depth: int, text: str) -> None:
@@ -140,13 +148,15 @@ def on_subcall_start(depth: int, model: str, prompt_preview: str) -> None:
         model=model,
         prompt_preview_chars=len(prompt_preview or ""),
     )
-    emit({
-        "type": "subcall_start",
-        "depth": depth,
-        "model": model,
-        "prompt_preview": prompt_preview[:200] if prompt_preview else "",
-        "timestamp": datetime.now().isoformat(),
-    })
+    emit(
+        {
+            "type": "subcall_start",
+            "depth": depth,
+            "model": model,
+            "prompt_preview": prompt_preview[:200] if prompt_preview else "",
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
     emit_progress("Sub-LM call started", f"depth={depth} model={model}")
 
 
@@ -159,14 +169,16 @@ def on_subcall_complete(depth: int, model: str, duration: float, error: str | No
         duration=duration,
         error=error,
     )
-    emit({
-        "type": "subcall_complete",
-        "depth": depth,
-        "model": model,
-        "duration": duration,
-        "error": error,
-        "timestamp": datetime.now().isoformat(),
-    })
+    emit(
+        {
+            "type": "subcall_complete",
+            "depth": depth,
+            "model": model,
+            "duration": duration,
+            "error": error,
+            "timestamp": datetime.now().isoformat(),
+        }
+    )
     status = f"error: {error}" if error else f"{duration:.1f}s"
     emit_progress("Sub-LM call finished", f"depth={depth} model={model} {status}")
 
@@ -222,12 +234,14 @@ def main():
 
     result = rlm.completion(document_content, root_prompt=args.prompt)
 
-    emit({
-        "type": "done",
-        "response": result.response,
-        "execution_time": result.execution_time,
-        "usage_summary": result.usage_summary.to_dict() if result.usage_summary else None,
-    })
+    emit(
+        {
+            "type": "done",
+            "response": result.response,
+            "execution_time": result.execution_time,
+            "usage_summary": result.usage_summary.to_dict() if result.usage_summary else None,
+        }
+    )
 
 
 if __name__ == "__main__":
