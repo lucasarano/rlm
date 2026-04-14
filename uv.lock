@@ -1764,6 +1764,8 @@ version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
+    { name = "dill" },
+    { name = "e2b-code-interpreter" },
     { name = "google-genai" },
     { name = "openai" },
     { name = "portkey-ai" },
@@ -1807,10 +1809,12 @@ test = [
 requires-dist = [
     { name = "anthropic", specifier = ">=0.75.0" },
     { name = "daytona", marker = "extra == 'daytona'", specifier = ">=0.128.1" },
+    { name = "dill", specifier = ">=0.3.7" },
     { name = "dill", marker = "extra == 'daytona'", specifier = ">=0.3.7" },
     { name = "dill", marker = "extra == 'e2b'", specifier = ">=0.3.7" },
     { name = "dill", marker = "extra == 'modal'", specifier = ">=0.3.7" },
     { name = "dill", marker = "extra == 'prime'", specifier = ">=0.3.7" },
+    { name = "e2b-code-interpreter", specifier = ">=0.0.11" },
     { name = "e2b-code-interpreter", marker = "extra == 'e2b'", specifier = ">=0.0.11" },
     { name = "google-genai", specifier = ">=1.56.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=0.73.0" },

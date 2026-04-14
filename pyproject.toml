@@ -20,6 +20,8 @@ classifiers = [
 
 dependencies = [
     "anthropic>=0.75.0",
+    "dill>=0.3.7",
+    "e2b-code-interpreter>=0.0.11",
     "google-genai>=1.56.0",
     "openai>=2.14.0",
     "portkey-ai>=2.1.0",
