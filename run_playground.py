@@ -26,11 +26,75 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 from rlm import RLM
-from rlm.core.types import RLMIteration, RLMMetadata
+from rlm.core.types import EnvironmentType, RLMIteration, RLMMetadata
 from rlm.logger.rlm_logger import RLMLogger
 
 SUBCALL_PATTERN = re.compile(r"\b(?:llm_query|rlm_query|llm_query_batched|rlm_query_batched)\s*\(")
 _EMIT_LOCK = threading.Lock()
+ISOLATED_ENVIRONMENTS = {"modal", "prime", "daytona", "e2b"}
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return int(value)
+
+
+def env_float(name: str) -> float | None:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
+def clamp(value: int, *, minimum: int, maximum: int) -> int:
+    return max(minimum, min(value, maximum))
+
+
+def load_environment_kwargs(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("RLM_ENVIRONMENT_KWARGS must be a JSON object")
+    return parsed
+
+
+def resolve_execution_environment(requested_environment: str) -> tuple[EnvironmentType, dict]:
+    environment = requested_environment.strip().lower()
+    supported = {"local", "docker", *ISOLATED_ENVIRONMENTS}
+    if environment not in supported:
+        raise ValueError(f"Unsupported RLM execution environment: {requested_environment}")
+
+    is_production = env_flag("RLM_PRODUCTION", default=os.getenv("NODE_ENV") == "production")
+    allow_local = env_flag("RLM_ALLOW_LOCAL_EXEC", default=False)
+    if is_production and environment not in ISOLATED_ENVIRONMENTS and not allow_local:
+        raise RuntimeError(
+            "Refusing to run user-triggered code in a non-isolated environment. "
+            "Set RLM_EXEC_ENVIRONMENT to modal, prime, daytona, or e2b, or set "
+            "RLM_ALLOW_LOCAL_EXEC=1 only for a trusted private deployment."
+        )
+
+    return environment, load_environment_kwargs(os.getenv("RLM_ENVIRONMENT_KWARGS"))
+
+
+def resolve_log_dir() -> str | None:
+    explicit_log_dir = os.getenv("RLM_LOG_DIR")
+    if explicit_log_dir:
+        return explicit_log_dir
+
+    if env_flag("RLM_ENABLE_PUBLIC_LOGS", default=False):
+        return os.path.join(os.path.dirname(__file__), "visualizer", "public", "logs")
+
+    return None
 
 
 def emit(event: dict) -> None:
@@ -190,6 +254,11 @@ def main():
     parser.add_argument("--model", default="claude-sonnet-4-20250514", help="Model name")
     parser.add_argument("--max-iterations", type=int, default=15, help="Max iterations")
     parser.add_argument("--max-depth", type=int, default=2, help="Max recursive subcall depth")
+    parser.add_argument(
+        "--environment",
+        default=os.getenv("RLM_EXEC_ENVIRONMENT", "local"),
+        help="Execution environment: local, docker, modal, prime, daytona, or e2b",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -206,10 +275,22 @@ def main():
 
     emit_progress(f"Document loaded ({len(document_content):,} chars)")
 
-    log_dir = os.path.join(os.path.dirname(__file__), "visualizer", "public", "logs")
+    max_iterations = clamp(
+        args.max_iterations,
+        minimum=1,
+        maximum=env_int("RLM_MAX_ITERATIONS", 8),
+    )
+    max_depth = clamp(args.max_depth, minimum=1, maximum=env_int("RLM_MAX_DEPTH", 2))
+    max_timeout = env_float("RLM_MAX_TIMEOUT_SECONDS")
+    max_tokens = os.getenv("RLM_MAX_TOKENS")
+    environment, environment_kwargs = resolve_execution_environment(args.environment)
+    log_dir = resolve_log_dir()
     logger = StreamingLogger(log_dir=log_dir)
 
-    emit_progress("Creating RLM instance...", f"model={args.model}")
+    emit_progress(
+        "Creating RLM instance...",
+        f"model={args.model} environment={environment} max_iterations={max_iterations}",
+    )
 
     rlm = RLM(
         backend="anthropic",
@@ -217,9 +298,13 @@ def main():
             "model_name": args.model,
             "api_key": api_key,
         },
-        environment="local",
-        max_depth=args.max_depth,
-        max_iterations=args.max_iterations,
+        environment=environment,
+        environment_kwargs=environment_kwargs,
+        max_depth=max_depth,
+        max_iterations=max_iterations,
+        max_timeout=max_timeout,
+        max_tokens=int(max_tokens) if max_tokens else None,
+        max_errors=env_int("RLM_MAX_ERRORS", 3),
         logger=logger,
         verbose=False,
         on_iteration_start=on_iteration_start,
@@ -245,4 +330,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        emit({"type": "error", "message": str(exc)})
+        sys.exit(1)

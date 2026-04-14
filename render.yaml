@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: starter
     region: oregon
-    buildCommand: pip install -e .
+    buildCommand: pip install -e ".[e2b]"
     startCommand: python render_backend.py
     healthCheckPath: /health
     envVars:
@@ -14,3 +14,25 @@ services:
         value: https://rlm-visualized.vercel.app
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: RLM_RUN_API_TOKEN
+        sync: false
+      - key: RLM_PRODUCTION
+        value: "true"
+      - key: RLM_EXEC_ENVIRONMENT
+        value: e2b
+      - key: RLM_MAX_ITERATIONS
+        value: "8"
+      - key: RLM_MAX_DEPTH
+        value: "2"
+      - key: RLM_RUN_TIMEOUT_SECONDS
+        value: "300"
+      - key: RLM_MAX_DOCUMENT_CHARS
+        value: "500000"
+      - key: RLM_MAX_PROMPT_CHARS
+        value: "8000"
+      - key: RLM_RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: RLM_RATE_LIMIT_MAX_REQUESTS
+        value: "20"
