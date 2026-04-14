@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: RLM-Visualized
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -e .
+    startCommand: python render_backend.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: ALLOWED_ORIGIN
+        value: https://rlm-visualized.vercel.app
+      - key: ANTHROPIC_API_KEY
+        sync: false
